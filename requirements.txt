@@ -1,0 +1,31 @@
+# Core ML / numerics
+torch
+torchvision
+numpy
+scikit-learn
+pandas
+
+# Technical indicators
+stockstats
+
+# Price data — Kraken public REST API (no auth, no geo-restrictions)
+# Uses the built-in `requests` library; no extra package needed.
+
+# Visualisation / export
+matplotlib
+seaborn
+dataframe_image
+Pillow
+
+# Utilities
+pytz
+requests
+schedule
+
+# Anthropic API (improvement agent)
+anthropic
+
+# EN_lib: internal library (not on PyPI) — provides get_binance_client(),
+# get_latest_fixel(), get_fixel_prediction(), get_2012_to_current_BTC_history().
+# Install manually from the private source before running fixelnet.
+# EN_lib

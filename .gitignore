@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pth
+.venv/
+*.egg-info/
+dist/
+build/
+logs/
+nnet_state_saves/
+.cache/
