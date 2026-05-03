@@ -127,7 +127,7 @@ def _print_signal(signal: int, long_s: float, heavy_s: float, short_s: float, bt
     print(f"  │{'FIXELNET SIGNAL — BTC/USD':^{width}}│")
     print("  ├" + "─" * width + "┤")
     print(f"  │  Signal      : {SIGNAL_NAMES[signal]:<{width - 17}}│")
-    print(f"  │  Confidence  : {confidence:.2%:<{width - 17}}│")
+    print(f"  │  Confidence  : {f'{confidence:.2%}':<{width - 17}}│")
     print(f"  │  BTC spot    : ${btc_spot:>12,.2f}{'':>{width - 31}}│")
     print("  ├" + "─" * width + "┤")
     print(f"  │  Long score        : {long_s:.4f}{'':>{width - 28}}│")
