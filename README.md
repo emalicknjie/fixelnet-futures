@@ -1,6 +1,35 @@
-# Fixelnet
+# Fixelnet Futures
 
-A personal BTC options paper trading system driven by a PyTorch convolutional neural network. The model watches daily OHLCV data, predicts market direction, selects the best 3-DTE Deribit option, sizes the position against a risk budget, and records the trade locally — all without touching a real broker. A self-improving agent reviews performance every morning and proposes code fixes via Telegram.
+A BTC paper futures trading system driven by the Fixelnet neural network. The same Conv2d signal engine that powers the [fixelnet](https://github.com/emalicknjie/fixelnet) options trader is wired here to unleveraged spot futures positions — long or short, sized by conviction, auto-closed after 72 hours or on a 2% stop-loss. Everything runs locally with JSON persistence and Telegram notifications.
+
+---
+
+## How it differs from fixelnet (options)
+
+| | fixelnet (options) | fixelnet-futures (this repo) |
+|---|---|---|
+| Instrument | Deribit BTC options (3 DTE) | Simulated BTC spot futures |
+| LONG signal | Buy call, $1,500 budget | Enter long, $500 notional |
+| SELL signal | Buy put, $1,500 budget | Enter short, $1,000 notional (2×) |
+| HOLD signal | No trade | Close any open position |
+| Price feed | Deribit public REST (options chain + index) | Kraken public REST (spot ticker) |
+| Position close | Option expires at intrinsic value | 72h window or 2% stop-loss |
+| Broker layer | None (paper simulator) | None (paper simulator) |
+| Signal engine | `fixelnet/` — unchanged | `fixelnet/` — unchanged |
+
+The fixelnet signal engine (`fixelnet/`) is byte-for-byte identical between the two repos. Only the execution layer differs.
+
+---
+
+## Signal mapping
+
+The neural network outputs three classes. Their original notebook intent is preserved here:
+
+| Class | Label | Notebook name | Action | Notional |
+|---|---|---|---|---|
+| 0 | `LONG` | BUY | Enter long | $500 |
+| 1 | `HEAVY_SHORT` | SELL | Enter short | $1,000 (2×) |
+| 2 | `HOLD` | HOLD | Close open position, no new entry | — |
 
 ---
 
@@ -8,133 +37,117 @@ A personal BTC options paper trading system driven by a PyTorch convolutional ne
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     run_trader.py  (9:00 AM UTC)                    │
-└───────────────────────────────┬─────────────────────────────────────┘
-                                │
-           ┌────────────────────┴─────────────────────┐
-           ▼                                          ▼
-┌──────────────────────┐              ┌───────────────────────────────┐
-│   Signal Engine      │              │   Deribit Price Feed          │
-│   fixelnet/          │              │   trading/deribit.py          │
-│                      │              │                               │
-│  Kraken REST API     │              │  Public REST — no auth        │
-│  → OHLCV history     │              │  → BTC/USD index price        │
-│  → StockStats fixels │              │  → Daily option chain         │
-│    (RSI,CCI,WR,RSV,  │              │    (strikes, bid/ask USD)     │
-│     ATR,VR × 15d)    │              │  → Per-instrument ticker      │
-│  → Conv2d network    │              │    for mark-to-market         │
-│  → 0 = LONG          │              └──────────────┬────────────────┘
-│    1 = HEAVY_SHORT   │                             │
-│    2 = SHORT         │                             │
-└──────────┬───────────┘                             │
-           │ signal + confidence                     │ chain + spot
-           └──────────────────┬──────────────────────┘
+│                  run_futures_trader.py  (9:00 AM UTC)               │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+          ┌──────────────────┴──────────────────┐
+          ▼                                     ▼
+┌───────────────────────┐         ┌─────────────────────────────────┐
+│   Signal Engine       │         │   Kraken Spot Price             │
+│   fixelnet/           │         │   (public ticker, no auth)      │
+│                       │         │                                 │
+│  Kraken REST → OHLCV  │         │  Last trade price: XBTUSD       │
+│  → StockStats fixels  │         │  Fallback: OHLCV last close     │
+│    RSI, CCI, WR, RSV, │         └──────────────┬──────────────────┘
+│    ATR, VR × 15 days  │                        │ btc_spot
+│  → Conv2d network     │                        │
+│  → class 0/1/2        │                        │
+└──────────┬────────────┘                        │
+           │ signal + confidence scores           │
+           └──────────────────┬───────────────────┘
                               ▼
            ┌──────────────────────────────────────────┐
            │   Strategy + Risk                        │
-           │   trading/strategy.py                    │
-           │   trading/risk.py                        │
+           │   trading/futures_strategy.py            │
+           │   trading/futures_risk.py                │
            │                                          │
-           │  Select nearest ATM strike               │
-           │  Target 3 DTE  (sort by abs(DTE − 3))    │
-           │  Mid-price from live bid/ask             │
+           │  LONG  → long,  1× notional ($500)       │
+           │  SELL  → short, 2× notional ($1,000)     │
+           │  HOLD  → close open position             │
+           │                                          │
            │  Confidence ≥ 65%                        │
-           │  Max 3 open positions                    │
-           │  Budget: $500 LONG/SHORT · $1500 HEAVY   │
+           │  Max 1 open position                     │
+           │  Stop-loss: ±2% from entry               │
            └──────────────────┬───────────────────────┘
-                              │ OrderParams
+                              │ FuturesOrderParams
                               ▼
            ┌──────────────────────────────────────────┐
-           │   Paper Trade Simulator                  │
-           │   trading/simulator.py                   │
+           │   Paper Futures Simulator                │
+           │   trading/futures_simulator.py           │
            │                                          │
-           │  record_trade()    → trades.json         │
-           │  mark_to_market()    daily               │
-           │  close_expired_positions()               │
-           │  send_weekly_summary_if_due()            │
+           │  record_futures_trade()                  │
+           │   → data/futures_trades.json             │
+           │                                          │
+           │  mark_to_market_futures()                │
+           │   → update current_price + unrealized    │
+           │   → auto-close on stop-loss              │
+           │   → auto-close after 72h window          │
+           │                                          │
+           │  close_open_on_hold()                    │
+           │   → settle at market on HOLD signal      │
+           │                                          │
+           │  get_futures_summary()                   │
+           │   → P&L, win rate, best/worst trade      │
            └──────────────────┬───────────────────────┘
                               │ Telegram
                               ▼
            ┌──────────────────────────────────────────┐
            │   Notifications                          │
-           │   trading/notify.py                      │
+           │   trading/futures_notify.py              │
            │                                          │
-           │  Trade entered / blocked / closed        │
+           │  Trade entered (direction, size, stop)   │
+           │  Trade closed (reason, P&L, result)      │
            │  Daily MTM with unrealized P&L           │
+           │  HOLD signal close                       │
            │  Weekly performance summary              │
            └──────────────────────────────────────────┘
-
-
-┌─────────────────────────────────────────────────────────────────────┐
-│             run_improvement_agent.sh  (9:30 AM UTC)                 │
-└───────────────────────────────┬─────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│   Self-Improving Agent    trading/improvement_agent.py              │
-│                                                                     │
-│  1. Collect context — trades (7d), positions, stats, log tail,      │
-│     source files (first 80 lines each), prior agent decisions       │
-│  2. Call claude-sonnet-4-6 → 1–3 prioritized improvement proposals  │
-│     each with: problem · fix · estimated impact · code patch        │
-│  3. Deliver each proposal to Telegram with interactive buttons:     │
-│           [ ✅ ACCEPT ]   [ ✏️ MODIFY ]   [ ❌ DECLINE ]           │
-│  4. ACCEPT  → auto-apply find→replace patch to source file          │
-│     MODIFY  → prompt for input, regenerate proposal, re-present     │
-│     DECLINE → log and move on                                       │
-│  5. All decisions written to data/improvement_agent_log.json        │
-└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Components
-
-### Signal Engine (`fixelnet/`)
-
-The core prediction pipeline. Fetches daily BTC/USD OHLCV from the Kraken public REST API, computes six technical indicators over a 15-day rolling window — ATR, CCI, RSI, RSV, VR, WR via `stockstats` — and runs them through a pretrained `Conv2d` network to predict one of three directional classes:
-
-| Class | Signal | Action | Budget |
-|---|---|---|---|
-| 0 | **LONG** | Buy call | $500 |
-| 1 | **HEAVY_SHORT** | Buy put, high conviction | $1,500 |
-| 2 | **SHORT** | Buy put | $500 |
-
-Input tensor shape: `(1, 1, 6, 15)` — one sample, one channel, six indicators, fifteen days. Hyperparameters are `exec()`'d from `neural_properties.txt` at load time; weights are loaded from a `.pth` state dict (not the pickled full model, so there's no class-name coupling at load time).
-
-### Deribit Price Feed (`trading/deribit.py`)
-
-Pulls live BTC option market data from Deribit's public REST API — no API key, no account required. Returns an option chain compatible with `strategy.signal_to_order_params()` with USD-denominated bid/ask prices. Deribit quotes premiums in BTC; this module multiplies by the live index price so callers always see dollars.
-
-Key functions:
-
-| Function | What it does |
-|---|---|
-| `get_btc_spot()` | Current BTC/USD index price |
-| `get_option_chain(dte_min, dte_max)` | Full chain filtered to a DTE window |
-| `get_quote(instrument_name)` | Single instrument bid/ask for MTM |
-
-Deribit offers daily BTC expirations, which makes precise 3-DTE targeting reliable.
-
-### Paper Trade Simulator (`trading/simulator.py`)
-
-All trades are tracked locally in JSON — nothing is sent to a real broker.
+## Position lifecycle
 
 ```
-data/
-  trades.json                  full ledger (open + closed)
-  positions.json               open positions with live MTM prices
-  last_weekly.txt              date of last weekly summary
-  improvement_agent_log.json   history of agent proposals and decisions
+Entry
+ └─ record_futures_trade()
+     ├─ entry_price   = Kraken spot at signal time
+     ├─ size_btc      = notional / entry_price
+     ├─ stop_loss     = entry × (1 − 0.02)  for long
+     │                = entry × (1 + 0.02)  for short
+     └─ close_after   = entry_time + 72 hours
+
+Daily MTM  (mark_to_market_futures)
+ ├─ Fetch fresh Kraken spot
+ ├─ Update current_price + unrealized_pnl
+ ├─ Check stop-loss → auto-close if triggered
+ └─ Check close_after → auto-close if 72h elapsed
+
+Signals
+ ├─ HOLD signal → close_open_on_hold() → settle at market
+ └─ LONG/SELL   → check risk → record new entry (if approved)
+
+Close
+ └─ close_futures_trade(reason)
+     ├─ reason = "stop_loss"   | −2% hit
+     ├─ reason = "72h_expiry"  | prediction window elapsed
+     ├─ reason = "hold_signal" | model emitted HOLD
+     └─ P&L = (close − entry) × size_btc   (long)
+            = (entry − close) × size_btc   (short)
 ```
 
-Settlement at expiry uses intrinsic value: `max(0, strike − BTC_spot)` for puts, `max(0, BTC_spot − strike)` for calls, using the Deribit index price at close.
+---
 
-### Self-Improving Agent (`trading/improvement_agent.py`)
+## Risk parameters
 
-The most interesting part of the project. Every morning at 9:30 AM the agent reads the current system state, calls the Anthropic API to get concrete improvement proposals, and delivers each one to Telegram with interactive buttons. Accepted proposals are auto-patched into the source files using exact string find→replace. All decisions are logged so the agent avoids proposing the same fix twice.
-
-The agent uses `claude-sonnet-4-6` with a detailed system prompt that constrains proposal scope: no breaking changes, no changes to model architecture, no Deribit authentication, only safe auto-applicable patches.
+| Parameter | Value | Notes |
+|---|---|---|
+| Base notional | $500 | LONG trades |
+| HEAVY_SHORT notional | $1,000 | 2× base; higher conviction short |
+| Max open positions | 1 | Only one futures position at a time |
+| Stop-loss | 2% | Auto-triggered on MTM check |
+| Prediction window | 72 hours | Matches Fixelnet's 3-day horizon |
+| Min confidence | 65% | Softmax score for predicted class |
+| Leverage | 1× | Unleveraged; notional = cash at risk |
 
 ---
 
@@ -143,11 +156,11 @@ The agent uses `claude-sonnet-4-6` with a detailed system prompt that constrains
 ### 1. Clone
 
 ```bash
-git clone https://github.com/emalicknjie/fixelnet.git
-cd fixelnet
+git clone https://github.com/emalicknjie/fixelnet-futures.git
+cd fixelnet-futures
 ```
 
-### 2. Python environment
+### 2. Dependencies
 
 ```bash
 python3 -m venv .venv
@@ -155,110 +168,125 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-> **Note:** `EN_lib` is a private internal library not on PyPI. Install it manually from its source before running the Jupyter notebooks. It is not required for `run_trader.py`.
-
 ### 3. Model weights
 
-Place the pretrained model directory at the path set by `MODEL_DIR`. The directory must contain:
+The model directory must contain:
 
 ```
 neural_properties.txt   hyperparameter definitions (exec'd at load time)
 test_weights.pth        PyTorch state dict
 ```
 
-### 4. Environment variables
+Point `MODEL_DIR` at it in `.env`.
 
-Copy the template below to `.env` in the project root and fill in your values:
+### 4. Environment
 
 ```ini
-# Required — path to pretrained model directory
+# .env
 MODEL_DIR=/path/to/nnet_state_saves/test
-
-# Anthropic API — required for the improvement agent
-ANTHROPIC_API_KEY=sk-ant-...
 
 # Telegram — optional; all notifications are silently skipped if absent
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
-
-# Tastytrade — only needed if re-enabling live broker execution
-TASTYTRADE_USERNAME=
-TASTYTRADE_PASSWORD=
-TASTYTRADE_CHALLENGE_ANSWER=
-TASTYTRADE_OTP=
-ACCOUNT_NUMBER=
 ```
 
-The Deribit price feed requires no credentials.
+No broker credentials. No API keys. Kraken and Deribit data is all public.
 
 ---
 
 ## Running
 
-### Daily trader
-
 ```bash
-# Dry run — shows signal, selected strike, risk verdict; records nothing
-python3 run_trader.py --dry-run
+# Dry run — shows today's signal, proposed order, risk verdict; records nothing
+python3 run_futures_trader.py --dry-run
 
-# Live run — records trade to data/trades.json
-python3 run_trader.py
+# Live paper trade
+python3 run_futures_trader.py
 ```
 
 Example dry-run output:
 
 ```
-══════════════════════════════════════════════════════════
-  BTC Signal: SHORT (BUY PUT)
-  Scores  →  Long 0.121  Heavy Short 0.203  Short 0.676
-  BTC spot    $83,412.00
-══════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════
+  Fixelnet Futures Paper Trader [DRY RUN]
+  2026-05-03 09:00:41
+══════════════════════════════════════════════════════════════
 
-  Symbol      : BTC-19APR26-84000-P
-  Strike      : $     84,000  (0.7% OTM)
-  Expiry      : 2026-04-19  (3 DTE)
-  Limit price : $    259.69
-  Quantity    : 1 contract(s)
-  Total debit : $    259.69
-  Budget      : $259.69 / $500  [PASS]
-  Verdict     : APPROVED
+[1/3] Running Fixelnet on BTC ...
 
-[DRY RUN] Trade NOT recorded.
-```
+  ┌────────────────────────────────────────────────────────┐
+  │              FIXELNET SIGNAL — BTC/USD                 │
+  ├────────────────────────────────────────────────────────┤
+  │  Signal      : SELL (SHORT 2×)                         │
+  │  Confidence  : 74.23%                                  │
+  │  BTC spot    :      $95,142.00                         │
+  ├────────────────────────────────────────────────────────┤
+  │  Long score        : 0.1204                            │
+  │  Heavy short score : 0.7423                            │
+  │  Short/hold score  : 0.1373                            │
+  └────────────────────────────────────────────────────────┘
 
-### Performance dashboard
+[2/3] Fetching BTC spot price and running daily maintenance ...
+  BTC/USD spot : $95,142.00
+  No open positions after MTM.
 
-```bash
-python3 show_performance.py
-```
+[3/3] Evaluating order ...
 
-Prints a box-drawn table of open positions, closed trades, and aggregate P&L stats directly in the terminal.
+  ┌────────────────────────────────────────────────────────┐
+  │                  PROPOSED FUTURES ORDER                │
+  ├────────────────────────────────────────────────────────┤
+  │  Direction   : SHORT (sell)                            │
+  │  Entry price :       $95,142.00                        │
+  │  Notional    :       $1,000.00  (2× base)              │
+  │  Size        : 0.010511 BTC                            │
+  │  Stop loss   :       $97,044.84  (+2%)                 │
+  │  Auto-close  : 72h  (Fixelnet window)                  │
+  ├────────────────────────────────────────────────────────┤
+  │                     RISK CHECK                         │
+  ├────────────────────────────────────────────────────────┤
+  │    Confidence          : 74.23%               [PASS]   │
+  │    Open positions      : 0/1                  [PASS]   │
+  │    Spot price          : $95,142.00           [PASS]   │
+  ├────────────────────────────────────────────────────────┤
+  │    Verdict       : APPROVED                            │
+  └────────────────────────────────────────────────────────┘
 
-### Improvement agent (manual run)
-
-```bash
-python3 -c "from trading.improvement_agent import run; run()"
+  [DRY RUN] Trade NOT recorded (dry-run mode).
+══════════════════════════════════════════════════════════════
+  Done.
+══════════════════════════════════════════════════════════════
 ```
 
 ---
 
-## Cron schedule
-
-Both scripts use shell wrappers that append timestamped output to daily log files under `logs/`. The improvement agent wrapper fires a Telegram crash alert if the process exits non-zero.
+## Cron
 
 ```cron
-# Daily trader — 9:00 AM UTC
-0  9 * * * /root/fixelnet/run_trader.sh
-
-# Improvement agent — 9:30 AM UTC (30 min after main trader)
-30 9 * * * /root/fixelnet/run_improvement_agent.sh
+# Daily futures trader — 9:00 AM UTC
+0 9 * * * cd /root/fixelnet-futures && python3 run_futures_trader.py >> logs/futures_$(date +\%F).log 2>&1
 ```
 
-Logs land at:
+---
+
+## Project layout
 
 ```
-logs/trader_YYYY-MM-DD.log
-logs/improvement_agent_YYYY-MM-DD.log
+fixelnet-futures/
+├── fixelnet/                       signal engine (unchanged from main repo)
+│   ├── data.py                     Kraken OHLCV fetch + price window
+│   ├── features.py                 fixel computation (6 indicators × 15 days)
+│   ├── models.py                   FixelNet Conv2d + loader
+│   └── signals.py                  LONG=0, HEAVY_SHORT=1, SHORT/HOLD=2
+├── trading/
+│   ├── futures_strategy.py         signal → FuturesOrderParams (direction, size_multiplier)
+│   ├── futures_risk.py             notional sizing, stop-loss price, pre-trade checks
+│   ├── futures_simulator.py        JSON persistence, MTM, stop-loss, 72h close
+│   └── futures_notify.py           Telegram notifications for all trade events
+├── data/
+│   └── futures_trades.json         trade ledger (open + closed)
+├── run_futures_trader.py           main entry point
+├── requirements.txt
+└── .env                            secrets (not committed)
 ```
 
 ---
@@ -269,41 +297,17 @@ logs/improvement_agent_YYYY-MM-DD.log
 |---|---|
 | Signal model | PyTorch `Conv2d`, `stockstats`, scikit-learn `MinMaxScaler` |
 | Historical data | Kraken public REST API (daily OHLCV) |
-| Options data | Deribit public REST API (chain, quotes, index price) |
-| AI agent | Anthropic API — `claude-sonnet-4-6` |
-| Notifications | Telegram Bot API — messages + inline keyboard callbacks |
-| Persistence | JSON flat files |
-| Scheduling | cron + bash wrappers |
-| Language | Python 3.10+, bash |
+| Live spot price | Kraken public ticker (`/0/public/Ticker?pair=XBTUSD`) |
+| Notifications | Telegram Bot API |
+| Persistence | JSON flat file (`data/futures_trades.json`) |
+| Scheduling | cron |
+| Language | Python 3.10+ |
 
 ---
 
-## Project layout
+## Related
 
-```
-fixelnet/
-├── fixelnet/                   signal engine
-│   ├── data.py                 Kraken OHLCV fetch
-│   ├── features.py             fixel computation (stockstats indicators)
-│   ├── models.py               FixelNet Conv2d architecture + loader
-│   └── signals.py              run_predictions(), plot_signals(), export_table()
-├── trading/                    execution layer
-│   ├── deribit.py              Deribit public REST client
-│   ├── simulator.py            paper trade recorder, MTM, settlement
-│   ├── strategy.py             signal → OrderParams (strike selection, pricing)
-│   ├── risk.py                 confidence, position cap, budget checks
-│   ├── notify.py               Telegram notification helpers
-│   ├── improvement_agent.py    daily Claude-powered self-improvement loop
-│   └── execution.py            Tastytrade session + DXLink (inactive / reference)
-├── data/                       runtime JSON (not committed)
-├── logs/                       daily cron log files
-├── nnet_state_saves/           model weights (not committed)
-├── run_trader.py               main entry point
-├── run_trader.sh               cron wrapper
-├── run_improvement_agent.sh    cron wrapper with Telegram crash alert
-├── show_performance.py         terminal P&L dashboard
-└── .env                        secrets (not committed)
-```
+- [emalicknjie/fixelnet](https://github.com/emalicknjie/fixelnet) — the original repo; same signal engine wired to Deribit BTC options
 
 ---
 
